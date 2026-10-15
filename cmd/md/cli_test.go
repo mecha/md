@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"md/pkg/document"
+	"go.yaml.in/yaml/v3"
 )
 
 func TestAutoCreatesAndPatchesDocument(t *testing.T) {
@@ -16,9 +16,9 @@ func TestAutoCreatesAndPatchesDocument(t *testing.T) {
 
 	code, _, stderr := invoke(t, []string{
 		path,
-		"--set", "id=1",
-		"--set", `title=Crash on Startup`,
-		"--set", `labels=['bug', 'backend']`,
+		"--prop", "id=1",
+		"--prop", `title=Crash on Startup`,
+		"--prop", `labels=['bug', 'backend']`,
 		"--body", "Initial body\n",
 	}, "")
 	if code != 0 {
@@ -34,7 +34,7 @@ func TestAutoCreatesAndPatchesDocument(t *testing.T) {
 
 	code, _, stderr = invoke(t, []string{
 		path,
-		"--set=status=open",
+		"--prop=status=open",
 		"--unset", "title",
 		"--body-stdin",
 	}, "Replacement body")
@@ -81,12 +81,12 @@ func TestModesAndExitCodes(t *testing.T) {
 	}
 }
 
-func TestSetAllowsQuotedFieldsContainingEquals(t *testing.T) {
+func TestPropAllowsQuotedFieldsContainingEquals(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fields.md")
 	code, _, stderr := invoke(t, []string{
 		path,
-		"--set", `"field=with=equals"=value=also=with=equals`,
-		"--set", `'it''s=valid'=true`,
+		"--prop", `"field=with=equals"=value=also=with=equals`,
+		"--prop", `'it''s=valid'=true`,
 	}, "")
 	if code != 0 {
 		t.Fatalf("create exit = %d, stderr = %q", code, stderr)
@@ -120,7 +120,7 @@ func TestBodySourcesAndPreservation(t *testing.T) {
 		t.Fatalf("body-only file = %q", data)
 	}
 
-	code, _, stderr = invoke(t, []string{path, "--set", "draft=false"}, "")
+	code, _, stderr = invoke(t, []string{path, "--prop", "draft=false"}, "")
 	if code != 0 {
 		t.Fatalf("field patch exit = %d, stderr = %q", code, stderr)
 	}
@@ -134,10 +134,10 @@ func TestArgumentErrorsAndHelp(t *testing.T) {
 	tests := [][]string{
 		{},
 		{"a.md", "--mode", "replace"},
-		{"a.md", "--set", "missing-separator"},
-		{"a.md", "--set", "field=["},
-		{"a.md", "--set", `"unterminated=value`},
-		{"a.md", "--set", `"field"missing=value`},
+		{"a.md", "--prop", "missing-separator"},
+		{"a.md", "--prop", "field=["},
+		{"a.md", "--prop", `"unterminated=value`},
+		{"a.md", "--prop", `"field"missing=value`},
 		{"a.md", "--body", "one", "--body-stdin"},
 		{"a.md", "--unknown"},
 		{"a.md", "b.md"},
@@ -150,7 +150,7 @@ func TestArgumentErrorsAndHelp(t *testing.T) {
 	}
 
 	code, stdout, stderr := invoke(t, []string{"--help"}, "")
-	if code != 0 || stderr != "" || !strings.Contains(stdout, "usage: md FILE [options]") || !strings.Contains(stdout, `--set '"field=with=equals"=value'`) {
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "usage: md FILE [options]") || !strings.Contains(stdout, `--prop '"field=with=equals"=value'`) {
 		t.Fatalf("help = exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
 }
@@ -161,7 +161,7 @@ func TestNoOpPatchDoesNotRewriteFile(t *testing.T) {
 	if err := os.WriteFile(path, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	code, _, stderr := invoke(t, []string{path, "--mode", "patch", "--set", "title=Keep formatting"}, "")
+	code, _, stderr := invoke(t, []string{path, "--mode", "patch", "--prop", "title=Keep formatting"}, "")
 	if code != 0 {
 		t.Fatalf("no-op patch exit = %d, stderr = %q", code, stderr)
 	}
@@ -181,15 +181,27 @@ func invoke(t *testing.T, args []string, stdin string) (int, string, string) {
 	return code, stdout.String(), stderr.String()
 }
 
-func readTestDocument(t *testing.T, path string) document.Document {
+type testDocument struct {
+	Fields map[string]any
+	Body   string
+}
+
+func readTestDocument(t *testing.T, path string) testDocument {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, err := document.Parse("", data)
-	if err != nil {
-		t.Fatal(err)
+	doc := testDocument{Fields: make(map[string]any), Body: string(data)}
+	if strings.HasPrefix(doc.Body, "---\n") {
+		parts := strings.SplitN(doc.Body[4:], "---\n", 2)
+		if len(parts) != 2 {
+			t.Fatal("missing delimiter")
+		}
+		if err := yaml.Unmarshal([]byte(parts[0]), &doc.Fields); err != nil {
+			t.Fatal(err)
+		}
+		doc.Body = parts[1]
 	}
 	return doc
 }

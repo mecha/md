@@ -1,4 +1,4 @@
-package document
+package md
 
 import (
 	"errors"
@@ -11,12 +11,12 @@ func TestParsePreservesBodyAndUnknownFields(t *testing.T) {
 	body := "# Heading\n\n---\nbody delimiter stays\n\x00"
 	data := []byte("---\nknown: value\nextension:\n  nested: [1, two]\n---\n" + body)
 
-	doc, err := Parse("wiki/page", data)
+	doc, err := parse(data)
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
-	if doc.ID != "wiki/page" || doc.Body != body {
-		t.Fatalf("Parse() = ID %q, body %q", doc.ID, doc.Body)
+	if doc.Body != body {
+		t.Fatalf("Parse() body %q", doc.Body)
 	}
 	wantExtension := map[string]any{"nested": []any{1, "two"}}
 	if !reflect.DeepEqual(doc.Fields["extension"], wantExtension) {
@@ -27,7 +27,7 @@ func TestParsePreservesBodyAndUnknownFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	roundTrip, err := Parse(doc.ID, encoded)
+	roundTrip, err := parse(encoded)
 	if err != nil {
 		t.Fatalf("Parse(Marshal()) error = %v", err)
 	}
@@ -43,7 +43,7 @@ func TestParseMarshalPreservesExistingFieldOrderAndNestedValues(t *testing.T) {
 	body := "body\nwithout normalization\x00"
 	data := []byte("---\nupdated: \"2024-01-02T03:04:05Z\"\nextension:\n  zeta: [1, {deep: true}]\n  link: \"[[issues/7]]\"\ntitle: Existing\ncreated: \"2024-01-01T03:04:05Z\"\n---\n" + body)
 
-	doc, err := Parse("wiki/existing", data)
+	doc, err := parse(data)
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
@@ -58,11 +58,11 @@ func TestParseMarshalPreservesExistingFieldOrderAndNestedValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	roundTrip, err := Parse(doc.ID, encoded)
+	roundTrip, err := parse(encoded)
 	if err != nil {
 		t.Fatalf("Parse(Marshal()) error = %v", err)
 	}
-	wantMarshaledOrder := []string{"updated", "extension", "title", "draft", "alpha", "created"}
+	wantMarshaledOrder := []string{"updated", "extension", "title", "created", "alpha", "draft"}
 	if !reflect.DeepEqual(roundTrip.FieldOrder, wantMarshaledOrder) {
 		t.Errorf("round-trip FieldOrder = %v, want %v", roundTrip.FieldOrder, wantMarshaledOrder)
 	}
@@ -74,9 +74,8 @@ func TestParseMarshalPreservesExistingFieldOrderAndNestedValues(t *testing.T) {
 	}
 }
 
-func TestMarshalNewDocumentUsesCanonicalOrderAndSortedExtensions(t *testing.T) {
-	doc := Document{
-		ID: "pulls/1",
+func TestMarshalNewDocumentUsesSortedFields(t *testing.T) {
+	doc := document{
 		Fields: map[string]any{
 			"updated": "2024-01-02T03:04:05Z",
 			"zeta":    true,
@@ -92,19 +91,18 @@ func TestMarshalNewDocumentUsesCanonicalOrderAndSortedExtensions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	parsed, err := Parse(doc.ID, encoded)
+	parsed, err := parse(encoded)
 	if err != nil {
 		t.Fatalf("Parse(Marshal()) error = %v", err)
 	}
-	want := []string{"title", "status", "merged", "author", "alpha", "zeta", "created", "updated"}
+	want := []string{"alpha", "author", "created", "merged", "status", "title", "updated", "zeta"}
 	if !reflect.DeepEqual(parsed.FieldOrder, want) {
 		t.Errorf("FieldOrder = %v, want %v\n%s", parsed.FieldOrder, want, encoded)
 	}
 }
 
 func TestMarshalTreatsAliasesAsExtensionData(t *testing.T) {
-	doc := Document{
-		ID: "issues/1",
+	doc := document{
 		Fields: map[string]any{
 			"updated": "2024-01-02T03:04:05Z",
 			"aliases": []string{"legacy-name"},
@@ -118,11 +116,11 @@ func TestMarshalTreatsAliasesAsExtensionData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	parsed, err := Parse(doc.ID, encoded)
+	parsed, err := parse(encoded)
 	if err != nil {
 		t.Fatalf("Parse(Marshal()) error = %v", err)
 	}
-	want := []string{"title", "author", "aliases", "alpha", "created", "updated"}
+	want := []string{"aliases", "alpha", "author", "created", "title", "updated"}
 	if !reflect.DeepEqual(parsed.FieldOrder, want) {
 		t.Errorf("FieldOrder = %v, want %v\n%s", parsed.FieldOrder, want, encoded)
 	}
@@ -133,7 +131,7 @@ func TestMarshalTreatsAliasesAsExtensionData(t *testing.T) {
 
 func TestParseOnlyRecognizesLeadingFrontMatter(t *testing.T) {
 	data := "intro\n---\nfield: value\n---\nend\n"
-	doc, err := Parse("wiki/page", []byte(data))
+	doc, err := parse([]byte(data))
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
@@ -143,7 +141,7 @@ func TestParseOnlyRecognizesLeadingFrontMatter(t *testing.T) {
 }
 
 func TestParseCRLFFrontMatterAndMalformedFrontMatter(t *testing.T) {
-	doc, err := Parse("users/a", []byte("---\r\nname: A\r\n---\r\nbody\r\n"))
+	doc, err := parse([]byte("---\r\nname: A\r\n---\r\nbody\r\n"))
 	if err != nil {
 		t.Fatalf("Parse(CRLF) error = %v", err)
 	}
@@ -151,11 +149,11 @@ func TestParseCRLFFrontMatterAndMalformedFrontMatter(t *testing.T) {
 		t.Errorf("Parse(CRLF) = %#v", doc)
 	}
 
-	_, err = Parse("users/a", []byte("---\nunterminated: true\n"))
+	_, err = parse([]byte("---\nunterminated: true\n"))
 	if !errors.Is(err, ErrInvalidFrontMatter) {
 		t.Errorf("Parse(unterminated) error = %v, want ErrInvalidFrontMatter", err)
 	}
-	_, err = Parse("users/a", []byte("---\ninvalid: [\n---\n"))
+	_, err = parse([]byte("---\ninvalid: [\n---\n"))
 	if !errors.Is(err, ErrInvalidFrontMatter) || !strings.Contains(err.Error(), "yaml") {
 		t.Errorf("Parse(invalid YAML) error = %v", err)
 	}
