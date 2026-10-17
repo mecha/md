@@ -84,6 +84,39 @@ func TestCLIWritePatchRead(t *testing.T) {
 	}
 }
 
+func TestReadCompactJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "note.md")
+	success(t, []string{"write", path, "-y", "z={items: [1, true]}", "-y", "a=null", "-b", "body\nwith spaces"}, "")
+	pretty := success(t, []string{"read", path, "-f=json"}, "")
+	if !strings.Contains(pretty, "\n  \"props\": [") {
+		t.Fatalf("default JSON is not pretty: %q", pretty)
+	}
+	var expected bytes.Buffer
+	if err := json.Compact(&expected, []byte(pretty)); err != nil {
+		t.Fatal(err)
+	}
+	expected.WriteByte('\n')
+	for _, args := range [][]string{
+		{"read", path, "-f=json", "-c"},
+		{"read", "--compact", "--format", "json", path},
+	} {
+		out := success(t, args, "")
+		if out != expected.String() || strings.Count(out, "\n") != 1 {
+			t.Fatalf("compact JSON: %q, want %q", out, expected.String())
+		}
+	}
+	success(t, []string{"write", path}, "")
+	if out := success(t, []string{"read", path, "-f=json", "-c"}, ""); out != "{\"props\":[],\"body\":\"\"}\n" {
+		t.Fatalf("empty compact document: %q", out)
+	}
+	// Compact output must retain the same validation and emit nothing on error.
+	success(t, []string{"write", path, "-y", "value=.inf"}, "")
+	code, out, stderr := invoke(t, []string{"read", path, "-f=json", "-c"}, "")
+	if code != 1 || out != "" || stderr == "" {
+		t.Fatalf("invalid compact JSON: %d %q %q", code, out, stderr)
+	}
+}
+
 func TestBodySourcesAndOperations(t *testing.T) {
 	for _, long := range []bool{false, true} {
 		flags := map[string]string{"body": "-b", "file": "-f", "stdin": "-s", "append": "-a", "prepend": "-p", "clear": "-c"}

@@ -10,6 +10,9 @@ func TestArgumentErrors(t *testing.T) {
 	tests := [][]string{
 		{}, {"unknown"}, {"read"}, {"write", "a", "b"}, {"read", ""},
 		{"read", "a", "-f=xml"}, {"read", "a", "-y=x=1"},
+		{"read", "a", "-c"}, {"read", "a", "--compact", "-f=yaml"},
+		{"read", "a", "-c", "-f=raw"}, {"read", "a", "-f=json", "-c=true"},
+		{"write", "a", "-c"}, {"patch", "a", "--compact"},
 		{"write", "a", "--prop=x=1"}, {"write", "a", "--mode=auto"},
 		{"write", "a", "-r", "-x"}, {"write", "a", "--unset=x"},
 		{"patch", "a", "--parents"}, {"patch", "a", "--require"},
@@ -81,6 +84,9 @@ func TestFlagAliases(t *testing.T) {
 			}
 			makeArgs := func(name string, inline bool) []string {
 				args := []string{command, "note.md"}
+				if flag.name == "compact" {
+					args = append(args, "-f=json")
+				}
 				if flag.name == "append" || flag.name == "prepend" {
 					args = append(args, "-b=x")
 				}

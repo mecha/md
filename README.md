@@ -34,12 +34,17 @@ bundled. `-` is a literal filename, not implicit stdin/stdout.
 ```sh
 md read note.md                  # Validate and print normalized Markdown
 md read note.md -f yaml          # Structured YAML
-md read note.md --format=json    # Structured JSON
+md read note.md --format=json    # Pretty-printed JSON
+md read note.md -f json -c       # Compact JSON (also --compact)
 ```
 
 `-f, --format` accepts `raw` (default), `yaml`, or `json`. Raw output is
 read-and-serialize, not a byte-for-byte copy: YAML comments and presentation are
 removed, property order is retained, and the body is unchanged.
+
+JSON is pretty-printed by default. `-c, --compact` emits single-line JSON with a
+trailing newline and requires `-f json`; it is rejected with raw or YAML output.
+This read option does not change `patch -c`, which still clears the body.
 
 Both structured formats separate the body from an ordered property list:
 

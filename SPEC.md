@@ -186,6 +186,7 @@ Commands:
 
 Read options:
   -f, --format FORMAT   Output format: raw (default), yaml, json
+  -c, --compact         Compact JSON output; requires --format json
 
 Write options:
   -y, --yaml NAME=YAML   Set a front-matter property; repeatable
@@ -237,6 +238,12 @@ representation, e.g.:
 ```json
 {"props":[{"name":"title","value":"My note"},{"name":"draft","value":false}],"body":"# Hello\n"}
 ```
+
+JSON output is pretty-printed by default. `read -c` or `read --compact` emits
+compact, single-line JSON instead. Both forms retain a trailing newline and the
+same validation and ordered representation. Compact requires `--format json`;
+using it with raw (including the default) or YAML is an argument error.
+`patch -c` continues to mean clear the body.
 
 `write` writes an entire document: omitted properties mean none; an omitted body
 means empty. Repeated assignments retain the first position and last value.

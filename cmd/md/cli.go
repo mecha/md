@@ -36,7 +36,8 @@ func helpText(command string) string {
 	header := "usage: md " + command + " FILE [OPTIONS]\n\n"
 	switch command {
 	case "read":
-		header += "  -f, --format FORMAT   Output format: raw (default), yaml, json"
+		header += `  -f, --format FORMAT   Output format: raw (default), yaml, json
+  -c, --compact         Compact JSON output; requires --format json`
 	case "write":
 		header += bodyHelp + `
   -r, --require          Require an existing target
@@ -69,6 +70,7 @@ Quote names containing '=', e.g. --yaml '"field=with=equals"=value'.`
 
 type options struct {
 	command, path, format       string
+	compact                     bool
 	set                         []md.Property
 	unset                       []string
 	body                        *string
@@ -88,7 +90,7 @@ type flag struct {
 func commandFlags(command string) []flag {
 	flags := []flag{{"help", "h", false}}
 	if command == "read" {
-		return append(flags, flag{"format", "f", true})
+		return append(flags, flag{"format", "f", true}, flag{"compact", "c", false})
 	}
 	flags = append(flags, flag{"yaml", "y", true}, flag{"body", "b", true}, flag{"body-file", "f", true}, flag{"body-stdin", "s", false})
 	if command == "write" {
@@ -156,6 +158,8 @@ func parseArgs(args []string) (options, bool, error) {
 				return opts, false, fmt.Errorf("invalid output format %q", value)
 			}
 			opts.format = value
+		case "compact":
+			opts.compact = true
 		case "yaml":
 			prop, err := parseProperty(value)
 			if err != nil {
@@ -209,6 +213,9 @@ func parseArgs(args []string) (options, bool, error) {
 	}
 	if opts.path == "" {
 		return opts, false, errors.New("FILE is required")
+	}
+	if opts.compact && opts.format != "json" {
+		return opts, false, errors.New("compact requires --format json")
 	}
 	if opts.require && opts.exclusive {
 		return opts, false, errors.New("require and exclusive are mutually exclusive")
@@ -267,7 +274,11 @@ func run(args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 		case "yaml":
 			data, err = yaml.Marshal(doc)
 		case "json":
-			data, err = json.MarshalIndent(doc, "", "  ")
+			if opts.compact {
+				data, err = json.Marshal(doc)
+			} else {
+				data, err = json.MarshalIndent(doc, "", "  ")
+			}
 			if err == nil {
 				data = append(data, '\n')
 			}
