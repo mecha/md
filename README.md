@@ -1,6 +1,7 @@
 # md
 
-Create and patch Markdown files with YAML front matter, from Go or the command line. Properties are schema-free YAML values; the Markdown body is preserved byte-for-byte unless explicitly replaced.
+Read, write, and patch Markdown files with ordered YAML front matter. Available
+as a Go package and CLI. See [SPEC.md](SPEC.md) for the complete contract.
 
 ## Build and test
 
@@ -18,72 +19,134 @@ go vet ./...
 ## CLI
 
 ```text
-md FILE [options]
-
--p, --prop FIELD=YAML  Set a top-level property (repeatable)
-    --unset FIELD     Remove a property (repeatable; ignored when creating)
--m, --mode MODE       auto (default), create, or patch
--b, --body MD         Replace the body with the supplied string
--f, --body-file FILE  Replace the body with file contents
--s, --body-stdin      Replace the body with standard input
--h, --help            Show help
+md read FILE [OPTIONS]
+md write FILE [OPTIONS]
+md patch FILE [OPTIONS]
 ```
 
-Options can precede or follow `FILE`. Value-taking flags accept either separate arguments or `=VALUE`, including short flags (`-m=patch`). Short flags are not bundled. The three body options are mutually exclusive, including repeated uses. Omitting a body option preserves an existing body; `--body ''` clears it.
+Use `md --help` or `md COMMAND --help` for help. Options can precede or follow
+`FILE` after the command. Value-taking flags accept separate arguments or
+`=VALUE`. Use `--` before a filename beginning with `-`. Short flags are not
+bundled. `-` is a literal filename, not implicit stdin/stdout.
+
+### Read
 
 ```sh
-# Create a file, or patch it if it already exists.
-md note.md -p 'title=My note' -p 'tags=[go, markdown]' -b '# Hello'
-
-# Update properties without changing the body.
-md note.md -m patch -p 'draft=false' --unset tags
-
-# Read the replacement body from a file or stdin.
-md note.md -f body.txt
-printf '# Replacement\n' | md note.md -s
-
-# Refuse to overwrite an existing file.
-md new.md --mode create --prop 'title=New note'
+md read note.md                  # Validate and print normalized Markdown
+md read note.md -f yaml          # Structured YAML
+md read note.md --format=json    # Structured JSON
 ```
 
-Property values are parsed as YAML: numbers, booleans, null, lists, and mappings are supported. Quote YAML strings when necessary, e.g. `-p 'code="001"'`. `null` sets a null value; it does not remove the property. Prop/unset operations run in argument order, with unset ignored when creating. Nested values are replaced, not recursively merged; dots in property names are literal.
+`-f, --format` accepts `raw` (default), `yaml`, or `json`. Raw output is
+read-and-serialize, not a byte-for-byte copy: YAML comments and presentation are
+removed, property order is retained, and the body is unchanged.
 
-Assignments split at the first `=` unless the property name is YAML-quoted:
+Both structured formats separate the body from an ordered property list:
+
+```json
+{
+  "props": [
+    {"name": "title", "value": "My note"},
+    {"name": "draft", "value": false}
+  ],
+  "body": "# Hello\n"
+}
+```
+
+Empty properties serialize as `[]`. JSON output fails rather than silently
+coercing non-string mapping keys, non-finite numbers, or invalid UTF-8.
+
+### Write
+
+**Write replaces the whole document.** Omitted properties and body are empty.
 
 ```sh
-md note.md -p '"field=with=equals"=value=also=with=equals'
+# Create exclusively: never overwrite an existing target.
+md write note.md -x -y 'title=My note' -y 'tags=[go, markdown]' -b '# Hello'
+
+# Replace an existing file; fail if it is missing.
+md write note.md --require --body-file body.txt
+
+# Create missing parents and restrict permissions for new paths.
+md write notes/private/note.md --parents --file-perms 0600 --dir-perms 0700
 ```
 
-`--prop` replaces the prototype's `--set`; `--set` is no longer accepted.
+| Option | Meaning |
+| --- | --- |
+| `-y, --yaml NAME=YAML` | Set a property; repeatable |
+| `-b, --body MD` | Body from an argument |
+| `-f, --body-file FILE` | Body from a file |
+| `-s, --body-stdin` | Body from stdin |
+| `-r, --require` | Fail if the target is missing |
+| `-x, --exclusive` | Fail if the target already exists |
+| `-p, --parents` | Create missing parent directories |
+| `--file-perms PERM` | New file permissions in octal; default `0644` |
+| `--dir-perms PERM` | New directory permissions in octal; default `0755` |
+
+By default, write creates or replaces the target. Require and exclusive are
+mutually exclusive; parents is ignored with require. Permission settings apply
+only to newly created paths and are subject to umask.
+
+### Patch
+
+Patch requires an existing file. Unmentioned properties and the body survive.
+
+```sh
+md patch note.md -y 'draft=false' -u obsolete
+printf '\n## More\n' | md patch note.md --append --body-stdin
+md patch note.md --prepend --body '# Introduction'
+md patch note.md --clear
+```
+
+| Option | Meaning |
+| --- | --- |
+| `-y, --yaml NAME=YAML` | Set a property; repeatable |
+| `-u, --unset NAME` | Remove a property; repeatable |
+| `-b, --body MD` | Patch body from an argument |
+| `-f, --body-file FILE` | Patch body from a file |
+| `-s, --body-stdin` | Patch body from stdin |
+| `-c, --clear` | Clear the body |
+| `-p, --prepend` | Prepend patch body without a separator |
+| `-a, --append` | Append patch body without a separator |
+
+A body source alone replaces the body; omitting it preserves the body. Append
+and prepend require a body source. Clear, append, and prepend are mutually
+exclusive. Clear cannot accompany a body source. Body sources are mutually
+exclusive, including repeated use of the same option. `--body ''` explicitly
+replaces the body with an empty string.
+
+### Property semantics
+
+Values are parsed as YAML, not stored as source strings:
+
+```sh
+md patch note.md -y 'count=3' -y 'draft=false' -y 'tags=[go, markdown]'
+md patch note.md -y 'config={theme: dark, retries: 2}'
+md patch note.md -y 'code="001"' -y 'nullable=null'
+md patch note.md -y '"field=with=equals"=value=also=with=equals'
+```
+
+- Null (including an empty assignment) sets a null value; use unset to remove it.
+- Names are nonempty strings. Dots in names are literal.
+- Updating a property retains its position. New properties append in argument
+  order. Repeated assignments use the last value without moving the property.
+- All sets happen **before all unsets**, regardless of argument order. Unset wins.
+- Nested values are replaced, not recursively merged.
 
 ### Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| 0 | Success, including a no-op or help |
-| 1 | Invalid arguments, malformed front matter, or other I/O failure |
-| 2 | Creation refused because the target already exists |
-| 3 | Patch target does not exist |
+| 0 | Success, including help and no-op patches |
+| 1 | Invalid input, validation failure, or other I/O error |
+| 2 | Exclusive creation refused: target exists |
+| 3 | Missing required target: read, patch, or write --require |
 
-Success is silent; errors go to stderr.
+A missing body-input file or missing parent during ordinary creation is code 1.
+Read output and help go to stdout; errors go to stderr. Write and patch are
+silent on success.
 
 ## Go API
-
-The package is `md/pkg/md` in this module:
-
-```go
-func Auto(file string, fields []Field, body *string) error
-func Create(file string, fields []Field, body *string) error
-func Patch(file string, fields []Field, body *string) error
-
-type Field struct {
-    Name  string
-    Value any
-    Unset bool
-}
-```
-
-`Auto` chooses create or patch based on whether the target exists. `Create` never overwrites a target; `Patch` requires an existing regular file. Fields are ordered operations, allowing repeated assignments and removals. Values must be YAML-encodable. An unset operation ignores `Value` and is ignored entirely during creation.
 
 ```go
 package main
@@ -94,38 +157,81 @@ import (
 )
 
 func main() {
-    body := "# My note\n"
-    err := md.Auto("note.md", []md.Field{
-        {Name: "title", Value: "My note"},
-        {Name: "tags", Value: []string{"go", "markdown"}},
-        {Name: "obsolete", Unset: true},
-    }, &body)
+    doc := md.Document{
+        Props: []md.Property{
+            {Name: "title", Value: "My note"},
+            {Name: "tags", Value: []string{"go", "markdown"}},
+        },
+        Body: "# Hello\n",
+    }
+
+    if err := md.Write("note.md", doc, md.ExclusiveCreate(true)); err != nil {
+        log.Fatal(err)
+    }
+
+    if err := md.Patch("note.md", md.DocumentPatch{
+        SetProps: []md.Property{{Name: "draft", Value: false}},
+        UnsetProps: []string{"obsolete"},
+        Body: "\n## More\n",
+        BodyOperation: md.AppendBody,
+    }); err != nil {
+        log.Fatal(err)
+    }
+
+    doc, err := md.Read("note.md")
     if err != nil {
         log.Fatal(err)
     }
-
-    // nil preserves the body. A pointer to an empty string clears it.
-    if err := md.Patch("note.md", []md.Field{
-        {Name: "draft", Value: false},
-    }, nil); err != nil {
+    normalized, err := doc.MarshalText()
+    if err != nil {
         log.Fatal(err)
     }
+    _ = normalized
 }
 ```
 
-Errors support `errors.Is(err, fs.ErrExist)`, `errors.Is(err, fs.ErrNotExist)`, and `errors.Is(err, md.ErrInvalidFrontMatter)`.
+`DocumentPatch.Apply(doc)` returns an independent document and an error, without
+I/O or mutation of either input. A zero-value patch does nothing. Body operations
+are `KeepBody`, `ReplaceBody`, `AppendBody`, `PrependBody`, and `DeleteBody`.
 
-## File behavior
+Write options are `RequireFile(bool)`, `ExclusiveCreate(bool)`,
+`CreateParents(bool)`, `FilePerms(os.FileMode)`, and `DirPerms(os.FileMode)`.
+Repeated options use the last value.
 
-- Front matter is recognized only at the beginning of a file, between `---` delimiter lines. Both LF and CRLF input are supported.
-- Existing property order is retained. New properties are appended alphabetically; newly created front matter is sorted alphabetically. No application-specific schema or timestamps are imposed.
-- Unmentioned properties and the body survive patches. Semantically unchanged patches do not rewrite the file, preserving its exact formatting and modification time.
-- Changed front matter is re-encoded as YAML with LF delimiters. Comments, quoting, and original YAML formatting are not preserved on changed files.
-- Files without properties are created without front matter. Removing the last property from existing front matter leaves an empty front-matter block.
-- Parent directories must already exist. Creation is exclusive, using permissions `0644` subject to umask. Patches use a temporary file in the same directory and an atomic rename, preserving permission bits.
-- Symlinks and non-regular patch targets are rejected. Atomic replacement does not preserve inode identity, hard-link relationships, ownership, or extended attributes. There is no locking or concurrent read-modify-write protection; callers must coordinate concurrent writers and use trusted paths.
+`Document.MarshalText()` produces Markdown. `json.Marshal(doc)` and
+`yaml.Marshal(doc)` produce the structured representation shown above.
 
-## Layout
+Property values support data scalars, sequences, mappings, and `time.Time`
+timestamps. Concrete numeric/container Go types may be normalized. Arbitrary
+objects, pointers, unsupported YAML tags, cycles, duplicate property names, and
+invalid values are rejected. Alias values are resolved; YAML merge-key syntax
+(`<<`) is not supported. Nesting is limited to 100 levels.
 
-- `pkg/md`: public writing API and internal parsing/serialization.
-- `cmd/md`: argument parsing, body input, and exit-code handling.
+Errors support `errors.Is` with `fs.ErrExist`, `fs.ErrNotExist`,
+`md.ErrInvalidFrontMatter`, `md.ErrInvalidDocument`, `md.ErrInvalidPatch`, and
+`md.ErrInvalidOptions`.
+
+## File behavior and limits
+
+- Front matter is recognized only at the beginning, between `---` delimiter
+  lines. LF and CRLF input are accepted. Body bytes are not normalized.
+- Serialization preserves property order but not YAML comments, quoting, or
+  anchors. A document with no properties is emitted as body only. If that body
+  begins with front-matter delimiters, a subsequent read will interpret them as
+  front matter; no escaping block is inserted.
+- No-op patches leave the original bytes, inode, and modification time intact.
+- Symlink and non-regular file targets are rejected. Parent paths must be trusted.
+- Exclusive creation uses an OS-level exclusive operation. Replacing a file uses
+  an atomic rename and preserves permission bits, not inode identity, ownership,
+  extended attributes, or hard-link relationships.
+- There is no locking across read–modify–write. Coordinate concurrent writers
+  externally. Directories created before a later failure are not rolled back.
+
+## Migration from the prototype
+
+- `Auto` and `Create` are replaced by `Write` with options.
+- `Field` is replaced by `Property`; deletion belongs in `DocumentPatch.UnsetProps`.
+- `Patch` now takes a `DocumentPatch`, not a field list and body pointer.
+- The CLI requires a command. `--prop`/`--set` becomes `--yaml`; `--mode` is removed.
+- New properties append in supplied order rather than being alphabetically sorted.
+- Removing the last property removes front matter on changed files.

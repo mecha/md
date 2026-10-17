@@ -1,111 +1,129 @@
 package main
 
 import (
-	"errors"
-	"os"
-	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
 
-func TestShortFlags(t *testing.T) {
-	for _, inline := range []bool{false, true} {
-		t.Run(map[bool]string{false: "separate", true: "inline"}[inline], func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "note.md")
-			args := []string{path, "-m", "create", "-p", "title=Short", "-b", "body"}
-			if inline {
-				args = []string{path, "-m=create", "-p=title=Short", "-b=body"}
-			}
-			code, _, stderr := invoke(t, args, "")
-			if code != 0 {
-				t.Fatalf("create: %d %s", code, stderr)
-			}
-			doc := readTestDocument(t, path)
-			if doc.Fields["title"] != "Short" || doc.Body != "body" {
-				t.Fatalf("document: %#v", doc)
-			}
-			bodyFile := filepath.Join(t.TempDir(), "body.txt")
-			if err := os.WriteFile(bodyFile, []byte("file body"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			args = []string{"-m", "patch", path, "-f", bodyFile}
-			if inline {
-				args = []string{"-m=patch", path, "-f=" + bodyFile}
-			}
-			code, _, stderr = invoke(t, args, "")
-			if code != 0 || readTestDocument(t, path).Body != "file body" {
-				t.Fatalf("body file: %d %s", code, stderr)
-			}
-			code, _, stderr = invoke(t, []string{path, "-s"}, "stdin body\x00")
-			if code != 0 || readTestDocument(t, path).Body != "stdin body\x00" {
-				t.Fatalf("stdin: %d %s", code, stderr)
-			}
-		})
-	}
-}
-
-func TestFlagValidation(t *testing.T) {
+func TestArgumentErrors(t *testing.T) {
 	tests := [][]string{
-		{"--set", "a=1"}, {"-s=true"}, {"--body-stdin=true"},
-		{"--unset", ""}, {"--body-file="}, {"-f="},
-		{"-b=one", "--body=two"}, {"-f=body.md", "-s"},
-		{"-s", "-f=body.md"}, {"-s", "-b=body"},
-		{"-p", ""}, {"-p", "=value"}, {"-p", `""=value`}, {"-p", `"\q"=value`},
+		{}, {"unknown"}, {"read"}, {"write", "a", "b"}, {"read", ""},
+		{"read", "a", "-f=xml"}, {"read", "a", "-y=x=1"},
+		{"write", "a", "--prop=x=1"}, {"write", "a", "--mode=auto"},
+		{"write", "a", "-r", "-x"}, {"write", "a", "--unset=x"},
+		{"patch", "a", "--parents"}, {"patch", "a", "--require"},
+		{"patch", "a", "-p"}, {"patch", "a", "-a"}, {"patch", "a", "-c", "-b=ignored"},
+		{"patch", "a", "-c", "-a", "-b=x"}, {"patch", "a", "-p", "-a", "-b=x"}, {"patch", "a", "-c", "-c"},
+		{"write", "a", "-b=x", "--body=y"}, {"write", "a", "-s", "-s"}, {"write", "a", "-s", "-f=x"},
+		{"write", "a", "-f="}, {"patch", "a", "-u="},
+		{"write", "a", "-y=x=["}, {"write", "a", "-y=x=!custom value"},
+		{"write", "a", "-y=x=1\n---\n2"}, {"write", "a", "-y=x={a: 1, a: 2}"},
+		{"write", "a", "-rx"}, {"write", "a", "-s=true"}, {"write", "a", "-x=false"},
 	}
-	for _, flag := range []string{"-m", "-p", "-b", "-f", "--mode", "--prop", "--unset", "--body", "--body-file"} {
-		tests = append(tests, []string{flag})
+	for _, value := range []string{"", "missing-separator", "=value", `""=value`, `"unterminated=value`, `"field"missing=value`, `"\q"=value`} {
+		tests = append(tests, []string{"write", "a", "-y", value})
+	}
+	for _, perms := range []string{"", "888", "1000", "-1", "+600", "0o600", "rwx", "999999999999999999999999999999"} {
+		tests = append(tests, []string{"write", "a", "--file-perms", perms})
+	}
+	for _, command := range []string{"read", "write", "patch"} {
+		for _, flag := range commandFlags(command) {
+			if flag.value {
+				tests = append(tests, []string{command, "a", "--" + flag.name})
+			} else {
+				tests = append(tests, []string{command, "a", "--" + flag.name + "=true"})
+			}
+		}
 	}
 	for _, args := range tests {
-		args = append([]string{"note.md"}, args...)
-		if _, _, err := parseArgs(args); err == nil {
-			t.Errorf("accepted %q", args)
-		}
-	}
-	opts, _, err := parseArgs([]string{"a=b.md", "-p", `"escaped\"=key"=null`})
-	if err != nil || opts.path != "a=b.md" || opts.operations[0].Name != `escaped"=key` {
-		t.Fatalf("quoted key: %#v, %v", opts, err)
-	}
-	code, stdout, stderr := invoke(t, []string{"-h"}, "")
-	if code != 0 || stderr != "" {
-		t.Fatalf("help: %d %s", code, stderr)
-	}
-	for _, flag := range []string{"-p, --prop", "-m, --mode", "-b, --body", "-f, --body-file", "-s, --body-stdin"} {
-		if !strings.Contains(stdout, flag) {
-			t.Errorf("help missing %s", flag)
+		code, out, err := invoke(t, args, "")
+		if code != 1 || out != "" || err == "" {
+			t.Errorf("accepted %q: %d %q %q", args, code, out, err)
 		}
 	}
 }
 
-type brokenIO struct{}
-
-func (brokenIO) Read([]byte) (int, error)  { return 0, errors.New("read failed") }
-func (brokenIO) Write([]byte) (int, error) { return 0, errors.New("write failed") }
-
-func TestIOErrors(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "note.md")
-	for _, args := range [][]string{{path, "-s"}, {path, "-f", filepath.Join(t.TempDir(), "missing")}, {"-h"}} {
-		code, err := run(args, brokenIO{}, brokenIO{})
-		if code != 1 || err == nil {
-			t.Fatalf("%q: %d %v", args, code, err)
-		}
+func TestQuotedNamesAndPositionals(t *testing.T) {
+	opts, help, err := parseArgs([]string{"write", "-y", `"field=with=equals"=value=also=with=equals`, "a=b.md", "--yaml", `'it''s=valid'=true`, "-y", `"escaped\"=key"=null`, "-y", "empty="})
+	if err != nil || help || opts.path != "a=b.md" {
+		t.Fatalf("args: %#v %v", opts, err)
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("created file on error: %v", err)
+	if opts.set[0].Name != "field=with=equals" || opts.set[0].Value != "value=also=with=equals" || opts.set[1].Name != "it's=valid" || opts.set[2].Name != `escaped"=key` || opts.set[3].Value != nil {
+		t.Fatalf("properties: %#v", opts.set)
+	}
+	for _, file := range []string{"-", "--help", "-dash.md"} {
+		opts, help, err := parseArgs([]string{"read", "--", file})
+		if err != nil || help || opts.path != file {
+			t.Fatalf("positional %q: %#v %v", file, opts, err)
+		}
 	}
 }
 
-func TestCLIOperationOrder(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "note.md")
-	code, _, stderr := invoke(t, []string{path, "-p", "a=1", "--unset", "a"}, "")
-	if code != 0 || readTestDocument(t, path).Fields["a"] != 1 {
-		t.Fatalf("create unset: %d %s", code, stderr)
+func TestFlagAliases(t *testing.T) {
+	for _, command := range []string{"read", "write", "patch"} {
+		for _, flag := range commandFlags(command) {
+			if flag.short == "" || flag.name == "help" {
+				continue
+			}
+			value := ""
+			switch flag.name {
+			case "format":
+				value = "json"
+			case "yaml":
+				value = "a=1"
+			case "body":
+				value = "body"
+			case "body-file":
+				value = "body.txt"
+			case "unset":
+				value = "a"
+			}
+			makeArgs := func(name string, inline bool) []string {
+				args := []string{command, "note.md"}
+				if flag.name == "append" || flag.name == "prepend" {
+					args = append(args, "-b=x")
+				}
+				if flag.value && inline {
+					return append(args, name+"="+value)
+				}
+				args = append(args, name)
+				if flag.value {
+					args = append(args, value)
+				}
+				return args
+			}
+			long, _, err := parseArgs(makeArgs("--"+flag.name, false))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, inline := range []bool{false, true} {
+				short, _, err := parseArgs(makeArgs("-"+flag.short, inline))
+				if err != nil || !reflect.DeepEqual(short, long) {
+					t.Fatalf("alias %s: %#v != %#v (%v)", flag.name, short, long, err)
+				}
+			}
+		}
 	}
-	code, _, stderr = invoke(t, []string{path, "--unset", "a", "-p", "a=null", "-b="}, "")
-	if code != 0 {
-		t.Fatalf("patch: %d %s", code, stderr)
+	for _, value := range []string{"0", "0000", "600", "0600", "0777"} {
+		if _, err := parsePerms(value); err != nil {
+			t.Errorf("permissions %q: %v", value, err)
+		}
 	}
-	doc := readTestDocument(t, path)
-	if value, ok := doc.Fields["a"]; !ok || value != nil || doc.Body != "" {
-		t.Fatalf("null property: %#v", doc)
+}
+
+func TestHelp(t *testing.T) {
+	for _, args := range [][]string{{"-h"}, {"--help"}, {"read", "-h"}, {"write", "--help"}, {"patch", "-h"}} {
+		code, out, err := invoke(t, args, "")
+		if code != 0 || err != "" || !strings.Contains(out, "usage: md ") {
+			t.Fatalf("help %q: %d %q %q", args, code, out, err)
+		}
+		if len(args) > 1 {
+			for _, flag := range commandFlags(args[0]) {
+				if !strings.Contains(out, "--"+flag.name) {
+					t.Errorf("help missing --%s", flag.name)
+				}
+			}
+		}
 	}
 }

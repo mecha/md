@@ -1,101 +1,214 @@
 package md
 
 import (
-	"bytes"
 	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"reflect"
+	"sync"
 	"testing"
 )
 
-func readDocument(t *testing.T, path string) document {
+func mustRead(t *testing.T, path string) Document {
 	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	doc, err := parse(data)
+	doc, err := Read(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return doc
 }
-
-func TestPublicAPI(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "note.md")
-	body := "# Hello\r\n\x00"
-	fields := []Field{{Name: "title", Value: "Hello"}, {Name: "nested", Value: map[string]any{"list": []any{1, true}}}, {Name: "null", Value: nil}, {Name: "title", Unset: true}}
-	if err := Create(path, fields, &body); err != nil {
+func mustWrite(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	doc := readDocument(t, path)
-	if doc.Body != body || doc.Fields["title"] != "Hello" {
-		t.Fatalf("created: %#v", doc)
+}
+
+func TestWriteModes(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		options  []WriteOption
+		existing bool
+		want     error
+	}{
+		{"default new", nil, false, nil}, {"default replace", nil, true, nil},
+		{"required new", []WriteOption{RequireFile(true)}, false, fs.ErrNotExist},
+		{"required existing", []WriteOption{RequireFile(true)}, true, nil},
+		{"exclusive new", []WriteOption{ExclusiveCreate(true)}, false, nil},
+		{"exclusive existing", []WriteOption{ExclusiveCreate(true)}, true, fs.ErrExist},
+		{"last option wins", []WriteOption{RequireFile(true), RequireFile(false), ExclusiveCreate(true)}, false, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "note.md")
+			if tt.existing {
+				mustWrite(t, path, "original")
+			}
+			err := Write(path, Document{Body: "replacement"}, tt.options...)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("Write: %v, want %v", err, tt.want)
+			}
+			if tt.want == nil && mustRead(t, path).Body != "replacement" {
+				t.Fatal("not written")
+			}
+			if tt.want != nil && tt.existing && mustRead(t, path).Body != "original" {
+				t.Fatal("modified on failure")
+			}
+		})
 	}
-	if value, ok := doc.Fields["null"]; !ok || value != nil {
-		t.Fatalf("null: %#v", doc.Fields)
+}
+
+func TestPermissionsAndParents(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a", "b", "note.md")
+	if err := Write(path, Document{}); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing parent: %v", err)
 	}
-	if err := Create(path, nil, nil); !errors.Is(err, fs.ErrExist) {
-		t.Fatalf("Create existing: %v", err)
+	if err := Write(path, Document{}, RequireFile(true), CreateParents(true)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("required: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "a")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("required write created parents")
+	}
+	if err := Write(path, Document{Body: "new"}, CreateParents(true), FilePerms(0o600), DirPerms(0o700)); err != nil {
+		t.Fatal(err)
+	}
+	for file, want := range map[string]fs.FileMode{path: 0o600, filepath.Dir(path): 0o700, filepath.Join(dir, "a"): 0o700} {
+		info, err := os.Stat(file)
+		if err != nil || info.Mode().Perm() != want {
+			t.Fatalf("permissions %s: %v %v", file, info, err)
+		}
 	}
 	if err := os.Chmod(path, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := Patch(path, []Field{{Name: "title", Unset: true}, {Name: "new", Value: 1}, {Name: "new", Unset: true}, {Name: "new", Value: 2}}, nil); err != nil {
+	if err := Write(path, Document{Body: "replace"}, FilePerms(0o777), DirPerms(0o777), CreateParents(true)); err != nil {
 		t.Fatal(err)
-	}
-	patched := readDocument(t, path)
-	if _, ok := patched.Fields["title"]; ok {
-		t.Fatal("title not removed")
-	}
-	if patched.Body != body || patched.Fields["new"] != 2 || !reflect.DeepEqual(patched.Fields["nested"], doc.Fields["nested"]) {
-		t.Fatalf("patched: %#v", patched)
 	}
 	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o640 {
-		t.Fatalf("permissions: %v", info.Mode())
-	}
-	empty := ""
-	if err := Auto(path, nil, &empty); err != nil {
-		t.Fatal(err)
-	}
-	if readDocument(t, path).Body != "" {
-		t.Fatal("body not cleared")
-	}
-	missing := filepath.Join(t.TempDir(), "new.md")
-	if err := Patch(missing, nil, nil); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("Patch missing: %v", err)
-	}
-	if err := Auto(missing, nil, nil); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(missing)
-	if err != nil || len(data) != 0 {
-		t.Fatalf("empty create: %q, %v", data, err)
+	if err != nil || info.Mode().Perm() != 0o640 {
+		t.Fatalf("existing mode: %v %v", info, err)
 	}
 	entries, err := os.ReadDir(filepath.Dir(path))
 	if err != nil || len(entries) != 1 {
-		t.Fatalf("temporary files left: %v, %v", entries, err)
+		t.Fatalf("temporary files left: %v %v", entries, err)
 	}
 }
 
-func TestPatchNoOpPreservesBytesAndIdentity(t *testing.T) {
-	for _, fields := range [][]Field{nil, {{Name: "title", Value: "Keep"}}, {{Name: "absent", Unset: true}}} {
-		path := filepath.Join(t.TempDir(), "note.md")
-		original := []byte("---\r\n# comment\r\ntitle: 'Keep'\r\n---\r\nbody\r\n")
-		if err := os.WriteFile(path, original, 0o600); err != nil {
+func TestInvalidWritesHaveNoSideEffects(t *testing.T) {
+	for _, options := range [][]WriteOption{
+		{nil}, {RequireFile(true), ExclusiveCreate(true)}, {FilePerms(0o1000)}, {DirPerms(os.ModeDir)},
+	} {
+		path := filepath.Join(t.TempDir(), "parent", "note.md")
+		options = append(options, CreateParents(true))
+		if err := Write(path, Document{}, options...); !errors.Is(err, ErrInvalidOptions) {
+			t.Fatalf("options: %v", err)
+		}
+		if _, err := os.Stat(filepath.Dir(path)); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal("created parents")
+		}
+	}
+	path := filepath.Join(t.TempDir(), "parent", "note.md")
+	invalid := Document{Props: []Property{{"a", make(chan int)}}}
+	if err := Write(path, invalid, CreateParents(true)); !errors.Is(err, ErrInvalidDocument) {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("created parents for invalid document")
+	}
+	path = filepath.Join(t.TempDir(), "existing.md")
+	mustWrite(t, path, "original")
+	if err := Write(path, invalid); !errors.Is(err, ErrInvalidDocument) || mustRead(t, path).Body != "original" {
+		t.Fatal("invalid write modified target")
+	}
+}
+
+func TestFileTargetErrors(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "note.md")
+	mustWrite(t, file, "body")
+	missing := filepath.Join(dir, "missing.md")
+	if _, err := Read(missing); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("read missing: %v", err)
+	}
+	if err := Patch(missing, DocumentPatch{}); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("patch missing: %v", err)
+	}
+	if err := Patch(missing, DocumentPatch{BodyOperation: 999}); !errors.Is(err, ErrInvalidPatch) {
+		t.Fatal(err)
+	}
+	targets := []string{dir, filepath.Join(file, "child")}
+	for _, destination := range []string{file, missing} {
+		link := filepath.Join(t.TempDir(), "link")
+		if err := os.Symlink(destination, link); err != nil {
 			t.Fatal(err)
 		}
+		targets = append(targets, link)
+		if err := Write(link, Document{}, ExclusiveCreate(true)); !errors.Is(err, fs.ErrExist) {
+			t.Fatalf("exclusive link: %v", err)
+		}
+	}
+	for _, target := range targets {
+		if _, err := Read(target); err == nil {
+			t.Errorf("read accepted %s", target)
+		}
+		if err := Write(target, Document{}); err == nil {
+			t.Errorf("write accepted %s", target)
+		}
+		if err := Patch(target, DocumentPatch{}); err == nil {
+			t.Errorf("patch accepted %s", target)
+		}
+	}
+	bad := filepath.Join(dir, "bad.md")
+	original := "---\na: [\n---\nbody"
+	mustWrite(t, bad, original)
+	if err := Patch(bad, DocumentPatch{BodyOperation: DeleteBody}); !errors.Is(err, ErrInvalidFrontMatter) {
+		t.Fatalf("invalid front matter: %v", err)
+	}
+	data, err := os.ReadFile(bad)
+	if err != nil || string(data) != original {
+		t.Fatal("bad file changed")
+	}
+	// Write intentionally replaces even malformed existing content.
+	if err := Write(bad, Document{Body: "fixed"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPatchFiles(t *testing.T) {
+	for _, tt := range []struct {
+		source string
+		patch  DocumentPatch
+		want   string
+	}{
+		{"body\x00", DocumentPatch{SetProps: []Property{{"a", 1}}}, "---\na: 1\n---\nbody\x00"},
+		{"---\na: 1\n---\nbody", DocumentPatch{UnsetProps: []string{"a"}}, "body"},
+		{"---\n---\nold", DocumentPatch{BodyOperation: ReplaceBody, Body: "new"}, "new"},
+		{"body", DocumentPatch{BodyOperation: AppendBody, Body: "end"}, "bodyend"},
+		{"body", DocumentPatch{BodyOperation: PrependBody, Body: "start"}, "startbody"},
+		{"body", DocumentPatch{BodyOperation: DeleteBody}, ""},
+	} {
+		path := filepath.Join(t.TempDir(), "note.md")
+		mustWrite(t, path, tt.source)
+		if err := Patch(path, tt.patch); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != tt.want {
+			t.Fatalf("patch got %q %v, want %q", data, err, tt.want)
+		}
+	}
+}
+
+func TestNoOpPatchPreservesFile(t *testing.T) {
+	for _, patch := range []DocumentPatch{{}, {SetProps: []Property{{"title", "Keep"}, {"number", uint8(1)}}}, {UnsetProps: []string{"absent"}}, {BodyOperation: AppendBody}} {
+		path := filepath.Join(t.TempDir(), "note.md")
+		original := "---\r\n# comment\r\ntitle: 'Keep'\r\nnumber: 1\r\n---\r\nbody\r\n"
+		mustWrite(t, path, original)
 		before, err := os.Stat(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := Patch(path, fields, nil); err != nil {
+		if err := Patch(path, patch); err != nil {
 			t.Fatal(err)
 		}
 		after, err := os.Stat(path)
@@ -103,103 +216,32 @@ func TestPatchNoOpPreservesBytesAndIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(data, original) || !os.SameFile(before, after) || before.ModTime() != after.ModTime() {
+		if err != nil || string(data) != original || !os.SameFile(before, after) || before.ModTime() != after.ModTime() {
 			t.Fatal("no-op rewrote file")
 		}
 	}
 }
 
-func TestPatchFrontMatterAndBodies(t *testing.T) {
-	tests := []struct {
-		name, original string
-		fields         []Field
-		body           *string
-		want           string
-	}{
-		{name: "remove last property", original: "---\na: 1\n---\nbody", fields: []Field{{Name: "a", Unset: true}}, want: "---\n---\nbody"},
-		{name: "add frontmatter", original: "body\x00", fields: []Field{{Name: "a", Value: 1}}, want: "---\na: 1\n---\nbody\x00"},
-		{name: "plain body", original: "old", body: new("new"), want: "new"},
-		{name: "empty frontmatter", original: "---\n---\nold", body: new("new"), want: "---\n---\nnew"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "note.md")
-			if err := os.WriteFile(path, []byte(tt.original), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := Patch(path, tt.fields, tt.body); err != nil {
-				t.Fatal(err)
-			}
-			data, err := os.ReadFile(path)
-			if err != nil || string(data) != tt.want {
-				t.Fatalf("got %q, %v; want %q", data, err, tt.want)
-			}
+func TestExclusiveCreationConcurrent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "note.md")
+	var wg sync.WaitGroup
+	results := make(chan error, 16)
+	for range 16 {
+		wg.Go(func() {
+			results <- Write(path, Document{Body: "complete"}, ExclusiveCreate(true))
 		})
 	}
-}
-
-func TestFileErrors(t *testing.T) {
-	dir := t.TempDir()
-	for _, apply := range []func(string, []Field, *string) error{Patch, Auto} {
-		if err := apply(dir, nil, nil); err == nil {
-			t.Fatal("directory accepted")
-		}
-	}
-	path := filepath.Join(dir, "bad.md")
-	original := "---\ninvalid: [\n---\nbody"
-	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := Patch(path, []Field{{Name: "a", Value: 1}}, nil); !errors.Is(err, ErrInvalidFrontMatter) {
-		t.Fatalf("malformed: %v", err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil || string(data) != original {
-		t.Fatal("failed patch modified file")
-	}
-	for _, target := range []string{path, filepath.Join(dir, "missing")} {
-		link := filepath.Join(t.TempDir(), "link.md")
-		if err := os.Symlink(target, link); err != nil {
+	wg.Wait()
+	close(results)
+	successes := 0
+	for err := range results {
+		if err == nil {
+			successes++
+		} else if !errors.Is(err, fs.ErrExist) {
 			t.Fatal(err)
 		}
-		if err := Create(link, nil, nil); !errors.Is(err, fs.ErrExist) {
-			t.Fatalf("create symlink: %v", err)
-		}
-		if err := Auto(link, nil, nil); err == nil {
-			t.Fatal("symlink accepted")
-		}
 	}
-	if err := Create(filepath.Join(dir, "missing", "note.md"), nil, nil); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("missing parent: %v", err)
-	}
-	if err := Auto(filepath.Join(path, "note.md"), nil, nil); err == nil {
-		t.Fatal("invalid parent accepted")
-	}
-}
-
-type brokenValue struct{}
-
-func (brokenValue) MarshalYAML() (any, error) { return nil, errors.New("cannot encode") }
-
-func TestMarshalFailureDoesNotWrite(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "note.md")
-	fields := []Field{{Name: "bad", Value: brokenValue{}}}
-	if err := Create(path, fields, nil); err == nil {
-		t.Fatal("expected marshal error")
-	}
-	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("created file: %v", err)
-	}
-	if err := Create(path, nil, new("original")); err != nil {
-		t.Fatal(err)
-	}
-	if err := Patch(path, fields, nil); err == nil {
-		t.Fatal("expected marshal error")
-	}
-	if readDocument(t, path).Body != "original" {
-		t.Fatal("changed file")
+	if successes != 1 || mustRead(t, path).Body != "complete" {
+		t.Fatalf("exclusive successes: %d", successes)
 	}
 }

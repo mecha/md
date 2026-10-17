@@ -2,126 +2,292 @@ package md
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
+	"reflect"
+	"time"
+	"unicode/utf8"
 
 	"go.yaml.in/yaml/v3"
+	"md/internal/yamldata"
 )
 
-// ErrInvalidFrontMatter indicates that a document starts front matter but does
-// not contain valid YAML surrounded by delimiter lines.
-var ErrInvalidFrontMatter = errors.New("invalid document front matter")
+var (
+	// ErrInvalidFrontMatter identifies malformed YAML front matter.
+	ErrInvalidFrontMatter = errors.New("invalid front matter")
+	// ErrInvalidDocument identifies invalid names, duplicate properties, or values.
+	ErrInvalidDocument = errors.New("invalid document")
+	// ErrInvalidPatch identifies an invalid patch operation or property.
+	ErrInvalidPatch = errors.New("invalid patch")
+	// ErrInvalidOptions identifies invalid write options.
+	ErrInvalidOptions = errors.New("invalid write options")
+)
 
-// document is a Markdown document. Fields contains the YAML front matter
-// without imposing a schema, so extension fields survive read-modify-write
-// operations. FieldOrder records the source order of parsed fields; callers may
-// leave it empty for new documents. Body is the exact content after the closing
-// delimiter line.
-type document struct {
-	Fields     map[string]any
-	FieldOrder []string
-	Body       string
+// Document contains ordered properties and the exact Markdown body bytes.
+type Document struct {
+	Props []Property `json:"props" yaml:"props"`
+	Body  string     `json:"body" yaml:"body"`
 }
 
-// parse parses data as a document. Only a delimiter on the first line
-// starts YAML front matter; otherwise all data is returned as Body.
-func parse(data []byte) (document, error) {
-	doc := document{Fields: make(map[string]any)}
+// Property is a named, parsed YAML value. Names are nonempty and unique in a
+// Document. Values are data, not objects with custom serialization behavior.
+type Property struct {
+	Name  string `json:"name" yaml:"name"`
+	Value any    `json:"value" yaml:"value"`
+}
 
+func parse(data []byte) (Document, error) {
+	doc := Document{Props: []Property{}, Body: string(data)}
 	start, ok := openingDelimiterEnd(data)
 	if !ok {
-		doc.Body = string(data)
 		return doc, nil
 	}
-
 	frontEnd, bodyStart, ok := closingDelimiter(data, start)
 	if !ok {
-		return document{}, fmt.Errorf("%w: missing closing delimiter", ErrInvalidFrontMatter)
+		return Document{}, fmt.Errorf("%w: missing closing delimiter", ErrInvalidFrontMatter)
 	}
-
-	front := data[start:frontEnd]
-	if len(bytes.TrimSpace(front)) != 0 {
-		var root yaml.Node
-		if err := yaml.Unmarshal(front, &root); err != nil {
-			return document{}, fmt.Errorf("%w: %v", ErrInvalidFrontMatter, err)
+	root, err := yamldata.Parse(data[start:frontEnd])
+	if err != nil {
+		return Document{}, fmt.Errorf("%w: %v", ErrInvalidFrontMatter, err)
+	}
+	if len(root.Content) > 0 {
+		mapping := root.Content[0]
+		// yaml represents comments-only input as an implicit empty null scalar.
+		empty := mapping.Kind == yaml.ScalarNode && mapping.Tag == "!!null" && mapping.Value == "" && mapping.Style == 0
+		if !empty {
+			if mapping.Kind != yaml.MappingNode {
+				return Document{}, fmt.Errorf("%w: expected a mapping", ErrInvalidFrontMatter)
+			}
+			for i := 0; i < len(mapping.Content); i += 2 {
+				key := mapping.Content[i]
+				if key.Kind != yaml.ScalarNode || key.Tag != "!!str" || key.Value == "" {
+					return Document{}, fmt.Errorf("%w: property names must be nonempty strings", ErrInvalidFrontMatter)
+				}
+				var value any
+				if err := mapping.Content[i+1].Decode(&value); err != nil {
+					return Document{}, fmt.Errorf("%w: %v", ErrInvalidFrontMatter, err)
+				}
+				doc.Props = append(doc.Props, Property{Name: key.Value, Value: value})
+			}
 		}
-		if err := yaml.Unmarshal(front, &doc.Fields); err != nil {
-			return document{}, fmt.Errorf("%w: %v", ErrInvalidFrontMatter, err)
-		}
-		if doc.Fields == nil {
-			doc.Fields = make(map[string]any)
-		}
-		doc.FieldOrder = mappingKeyOrder(&root)
 	}
 	doc.Body = string(data[bodyStart:])
-	return doc, nil
+	result, err := cloneDocument(doc)
+	if err != nil {
+		return Document{}, fmt.Errorf("%w: %w", ErrInvalidFrontMatter, err)
+	}
+	return result, nil
 }
 
-// Marshal serializes a document using ordered YAML front matter. Existing
-// fields retain their parsed relative order, while fields not in FieldOrder are
-// appended in alphabetical order. The Body bytes are
-// appended unchanged after the closing delimiter line.
-func (d document) Marshal() ([]byte, error) {
-	fields := d.Fields
-	if fields == nil {
-		fields = map[string]any{}
+// MarshalText returns normalized Markdown with YAML front matter. Property
+// order and body bytes are preserved; YAML presentation is not.
+func (d Document) MarshalText() ([]byte, error) {
+	doc, err := cloneDocument(d)
+	if err != nil {
+		return nil, err
 	}
-
+	if len(doc.Props) == 0 {
+		return []byte(doc.Body), nil
+	}
 	mapping := yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-	for _, key := range d.orderedFieldNames(fields) {
-		keyNode := yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}
-		var valueNode yaml.Node
-		if err := valueNode.Encode(fields[key]); err != nil {
-			return nil, fmt.Errorf("marshal document front matter field %q: %w", key, err)
+	for _, prop := range doc.Props {
+		key := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: prop.Name}
+		var value yaml.Node
+		if err := value.Encode(prop.Value); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidDocument, err)
 		}
-		mapping.Content = append(mapping.Content, &keyNode, &valueNode)
+		mapping.Content = append(mapping.Content, key, &value)
 	}
 	front, err := yaml.Marshal(&mapping)
 	if err != nil {
-		return nil, fmt.Errorf("marshal document front matter: %w", err)
+		return nil, fmt.Errorf("%w: %v", ErrInvalidDocument, err)
 	}
-
-	var out bytes.Buffer
-	out.WriteString("---\n")
-	out.Write(front)
-	out.WriteString("---\n")
-	out.WriteString(d.Body)
-	return out.Bytes(), nil
+	return []byte("---\n" + string(front) + "---\n" + doc.Body), nil
 }
 
-func mappingKeyOrder(root *yaml.Node) []string {
-	if root == nil || len(root.Content) == 0 {
-		return nil
+// MarshalJSON implements the ordered {props: [...], body: ...} representation.
+// Values with non-string mapping keys, non-finite numbers, or invalid UTF-8
+// cannot be represented faithfully and return an error.
+func (d Document) MarshalJSON() ([]byte, error) {
+	doc, err := cloneDocument(d)
+	if err != nil {
+		return nil, err
 	}
-	mapping := root.Content[0]
-	if mapping.Kind != yaml.MappingNode {
-		return nil
+	if !utf8.ValidString(doc.Body) {
+		return nil, fmt.Errorf("%w: JSON body is not UTF-8", ErrInvalidDocument)
 	}
-	order := make([]string, 0, len(mapping.Content)/2)
-	for index := 0; index+1 < len(mapping.Content); index += 2 {
-		order = append(order, mapping.Content[index].Value)
+	for i := range doc.Props {
+		doc.Props[i].Value, err = jsonValue(doc.Props[i].Value)
+		if err != nil {
+			return nil, fmt.Errorf("%w: property %q: %v", ErrInvalidDocument, doc.Props[i].Name, err)
+		}
 	}
-	return order
+	type wireDocument Document
+	data, err := json.Marshal(wireDocument(doc))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidDocument, err)
+	}
+	return data, nil
 }
 
-func (d document) orderedFieldNames(fields map[string]any) []string {
-	order := make([]string, 0, len(fields))
-	seen := make(map[string]bool)
-	for _, key := range d.FieldOrder {
-		if _, present := fields[key]; present && !seen[key] {
-			order = append(order, key)
-			seen[key] = true
+// MarshalYAML implements the ordered structured representation, not Markdown.
+func (d Document) MarshalYAML() (any, error) {
+	doc, err := cloneDocument(d)
+	if err != nil {
+		return nil, err
+	}
+	if !utf8.ValidString(doc.Body) {
+		return nil, fmt.Errorf("%w: YAML body is not UTF-8", ErrInvalidDocument)
+	}
+	type wireDocument Document
+	return wireDocument(doc), nil
+}
+
+func cloneDocument(d Document) (Document, error) {
+	result := Document{Props: make([]Property, 0, len(d.Props)), Body: d.Body}
+	seen := make(map[string]bool, len(d.Props))
+	for _, prop := range d.Props {
+		if prop.Name == "" || !utf8.ValidString(prop.Name) || seen[prop.Name] {
+			return Document{}, fmt.Errorf("%w: empty, invalid, or duplicate property name %q", ErrInvalidDocument, prop.Name)
+		}
+		seen[prop.Name] = true
+		value, err := cloneValue(reflect.ValueOf(prop.Value), make(map[visit]bool), 0)
+		if err != nil {
+			return Document{}, fmt.Errorf("%w: property %q: %v", ErrInvalidDocument, prop.Name, err)
+		}
+		// Normalized Go keys can still collide in YAML (for example int(1)
+		// and uint(1)). Validate the encoding too, so Apply and Write cannot
+		// produce documents that Read would reject.
+		encoded, err := yaml.Marshal(value)
+		if err == nil {
+			_, err = yamldata.Parse(encoded)
+		}
+		if err != nil {
+			return Document{}, fmt.Errorf("%w: property %q: %v", ErrInvalidDocument, prop.Name, err)
+		}
+		result.Props = append(result.Props, Property{Name: prop.Name, Value: value})
+	}
+	return result, nil
+}
+
+type visit struct {
+	typ    reflect.Type
+	ptr    uintptr
+	length int
+}
+
+func cloneValue(v reflect.Value, active map[visit]bool, depth int) (any, error) {
+	if depth > 100 {
+		return nil, fmt.Errorf("value nesting exceeds 100 levels")
+	}
+	if !v.IsValid() {
+		return nil, nil
+	}
+	if v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return nil, nil
+		}
+		return cloneValue(v.Elem(), active, depth+1)
+	}
+	if v.Type() == reflect.TypeFor[time.Time]() {
+		timestamp := v.Interface().(time.Time)
+		if _, err := timestamp.MarshalText(); err != nil {
+			return nil, fmt.Errorf("invalid timestamp: %w", err)
+		}
+		return timestamp, nil
+	}
+	if v.Kind() == reflect.Map || v.Kind() == reflect.Slice {
+		id := visit{v.Type(), v.Pointer(), v.Len()}
+		if active[id] {
+			return nil, fmt.Errorf("cyclic value")
+		}
+		active[id] = true
+		defer delete(active, id)
+	}
+	switch v.Kind() {
+	case reflect.Bool:
+		return v.Bool(), nil
+	case reflect.String:
+		if !utf8.ValidString(v.String()) {
+			return nil, fmt.Errorf("value is not UTF-8")
+		}
+		return v.String(), nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return v.Int(), nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return v.Uint(), nil
+	case reflect.Float32, reflect.Float64:
+		return v.Float(), nil
+	case reflect.Array, reflect.Slice:
+		values := make([]any, v.Len())
+		for i := range values {
+			value, err := cloneValue(v.Index(i), active, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			values[i] = value
+		}
+		return values, nil
+	case reflect.Map:
+		values := make(map[any]any, v.Len())
+		stringsOnly := true
+		iter := v.MapRange()
+		for iter.Next() {
+			key, err := cloneValue(iter.Key(), active, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			if key != nil && !reflect.TypeOf(key).Comparable() {
+				return nil, fmt.Errorf("mapping key must be scalar")
+			}
+			if _, ok := key.(string); !ok {
+				stringsOnly = false
+			}
+			if _, exists := values[key]; exists {
+				return nil, fmt.Errorf("duplicate normalized mapping key")
+			}
+			value, err := cloneValue(iter.Value(), active, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			values[key] = value
+		}
+		if stringsOnly {
+			result := make(map[string]any, len(values))
+			for key, value := range values {
+				result[key.(string)] = value
+			}
+			return result, nil
+		}
+		return values, nil
+	default:
+		return nil, fmt.Errorf("unsupported value type %s", v.Type())
+	}
+}
+
+func jsonValue(value any) (any, error) {
+	switch v := value.(type) {
+	case map[any]any:
+		return nil, fmt.Errorf("JSON requires string mapping keys")
+	case map[string]any:
+		for key, child := range v {
+			normalized, err := jsonValue(child)
+			if err != nil {
+				return nil, err
+			}
+			v[key] = normalized
+		}
+	case []any:
+		for i, child := range v {
+			normalized, err := jsonValue(child)
+			if err != nil {
+				return nil, err
+			}
+			v[i] = normalized
 		}
 	}
-	var added []string
-	for key := range fields {
-		if !seen[key] {
-			added = append(added, key)
-		}
-	}
-	sort.Strings(added)
-	return append(order, added...)
+	return value, nil
 }
 
 func openingDelimiterEnd(data []byte) (int, bool) {
@@ -137,8 +303,7 @@ func openingDelimiterEnd(data []byte) (int, bool) {
 func closingDelimiter(data []byte, start int) (frontEnd, bodyStart int, ok bool) {
 	for lineStart := start; lineStart <= len(data); {
 		lineEnd := bytes.IndexByte(data[lineStart:], '\n')
-		next := len(data)
-		contentEnd := len(data)
+		next, contentEnd := len(data), len(data)
 		if lineEnd >= 0 {
 			contentEnd = lineStart + lineEnd
 			next = contentEnd + 1
