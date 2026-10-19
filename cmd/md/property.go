@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mecha/md/internal/yamldata"
+	"github.com/mecha/md/pkg/md"
 	"go.yaml.in/yaml/v3"
-	"md/internal/yamldata"
-	"md/pkg/md"
 )
 
 func parseProperty(argument string) (md.Property, error) {

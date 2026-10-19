@@ -9,8 +9,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/mecha/md/internal/yamldata"
 	"go.yaml.in/yaml/v3"
-	"md/internal/yamldata"
 )
 
 var (

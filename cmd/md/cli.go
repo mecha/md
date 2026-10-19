@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/mecha/md/pkg/md"
 	"go.yaml.in/yaml/v3"
-	"md/pkg/md"
 )
 
 const usage = `usage: md COMMAND FILE [OPTIONS]

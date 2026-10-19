@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mecha/md/pkg/md"
 	"go.yaml.in/yaml/v3"
-	"md/pkg/md"
 )
 
 func invoke(t *testing.T, args []string, stdin string) (int, string, string) {

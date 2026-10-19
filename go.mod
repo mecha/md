@@ -1,4 +1,4 @@
-module md
+module github.com/mecha/md
 
 go 1.27.1
 

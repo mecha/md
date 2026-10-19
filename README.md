@@ -158,7 +158,7 @@ package main
 
 import (
     "log"
-    "md/pkg/md"
+    "github.com/mecha/md/pkg/md"
 )
 
 func main() {
