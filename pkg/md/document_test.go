@@ -12,6 +12,52 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+func TestDocumentProp(t *testing.T) {
+	props := []Property{{"title", "Note"}, {"draft", false}, {"nullable", nil}, {"config.theme", "dark"}}
+	for _, tt := range []struct {
+		name  string
+		doc   Document
+		key   string
+		want  Property
+		found bool
+	}{
+		{"zero document", Document{}, "title", Property{}, false},
+		{"empty properties", Document{Props: []Property{}}, "title", Property{}, false},
+		{"first", Document{Props: props}, "title", props[0], true},
+		{"false value", Document{Props: props}, "draft", props[1], true},
+		{"null value", Document{Props: props}, "nullable", props[2], true},
+		{"last and literal dots", Document{Props: props}, "config.theme", props[3], true},
+		{"missing", Document{Props: props}, "missing", Property{}, false},
+		{"case sensitive", Document{Props: props}, "Title", Property{}, false},
+		{"empty key", Document{Props: props}, "", Property{}, false},
+		{"first duplicate", Document{Props: []Property{{"title", "first"}, {"title", "second"}}}, "title", Property{"title", "first"}, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, found := tt.doc.Prop(tt.key)
+			if found != tt.found || !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("Prop(%q) = %#v, %t; want %#v, %t", tt.key, got, found, tt.want, tt.found)
+			}
+		})
+	}
+}
+
+func TestDocumentPropReturnsShallowCopy(t *testing.T) {
+	value := map[string]any{"theme": "dark"}
+	doc := Document{Props: []Property{{Name: "config", Value: value}}}
+	prop, ok := doc.Prop("config")
+	if !ok {
+		t.Fatal("property not found")
+	}
+	prop.Name = "renamed"
+	if doc.Props[0].Name != "config" {
+		t.Fatal("changing returned property name changed the document")
+	}
+	prop.Value.(map[string]any)["theme"] = "light"
+	if value["theme"] != "light" {
+		t.Fatal("nested value was cloned")
+	}
+}
+
 func TestDocumentRoundTrip(t *testing.T) {
 	body := "# Heading\r\n\n---\nbody delimiter\x00\xff"
 	source := "---\r\nz: &list [1, {deep: true}]\r\na: *list\r\nnull: null\r\n---\r\n" + body

@@ -33,6 +33,18 @@ type Property struct {
 	Value any    `json:"value" yaml:"value"`
 }
 
+// Prop returns the first property whose name exactly matches key.
+// If no property matches, it returns Property{} and false.
+// The returned property is a shallow copy; nested values are not cloned.
+func (d Document) Prop(key string) (Property, bool) {
+	for _, prop := range d.Props {
+		if prop.Name == key {
+			return prop, true
+		}
+	}
+	return Property{}, false
+}
+
 // MarshalText returns normalized Markdown with YAML front matter. Property
 // order and body bytes are preserved; YAML presentation is not.
 func (d Document) MarshalText() ([]byte, error) {

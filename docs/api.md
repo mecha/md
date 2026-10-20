@@ -11,6 +11,11 @@ Import `github.com/mecha/md/pkg/md`.
 `Document` contains ordered `Props []Property` and a `Body string`. Each
 `Property` has a `Name string` and a `Value any`.
 
+`doc.Prop(key string) (Property, bool)` returns the first property with an exact,
+case-sensitive name match, or `Property{}, false` if absent. A null value still
+returns `true`. The returned property is a shallow copy; nested values are shared
+with the document.
+
 ## Example
 
 
