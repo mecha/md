@@ -64,6 +64,7 @@ func TestApplyValidation(t *testing.T) {
 	for _, patch := range []DocumentPatch{
 		{BodyOperation: -1}, {BodyOperation: 100}, {UnsetProps: []string{""}}, {UnsetProps: []string{"\xff"}},
 		{SetProps: []Property{{"", nil}}}, {SetProps: []Property{{"a", func() {}}}, UnsetProps: []string{"a"}},
+		{SetProps: []Property{{"a", func() {}}, {"a", true}}},
 	} {
 		if _, err := patch.Apply(Document{}); !errors.Is(err, ErrInvalidPatch) {
 			t.Errorf("patch %#v: %v", patch, err)
@@ -71,6 +72,9 @@ func TestApplyValidation(t *testing.T) {
 	}
 	if _, err := (DocumentPatch{}).Apply(Document{Props: []Property{{"a", 1}, {"a", 2}}}); !errors.Is(err, ErrInvalidDocument) {
 		t.Fatalf("bad document: %v", err)
+	}
+	if _, err := (DocumentPatch{SetProps: []Property{{"a", new(int)}}}).Apply(Document{}); !errors.Is(err, ErrInvalidPatch) || !errors.Is(err, ErrInvalidDocument) {
+		t.Fatalf("invalid set must wrap patch and document errors: %v", err)
 	}
 	original := Document{Props: []Property{{"a", true}}, Body: "body"}
 	result, err := (DocumentPatch{}).Apply(original)

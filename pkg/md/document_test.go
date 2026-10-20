@@ -63,6 +63,9 @@ func TestParseBoundaries(t *testing.T) {
 		"---\na: {x: 1, x: 2}\n---\n", "---\n1: number\n---\n", "---\n'': empty\n---\n",
 		"---\na: !custom x\n---\n", "---\na: &a [*a]\n---\n", "---\na: *missing\n---\n",
 		"---\na: {[x]: y}\n---\n", "---\na: !!int nope\n---\n",
+		"---\na: {1: first, 0x1: second}\n---\n",
+		"---\na: {null: first, ~: second}\n---\n",
+		"---\nbase: &base {a: 1}\nvalue: {<<: *base}\n---\n",
 	} {
 		if _, err := parse([]byte(source)); !errors.Is(err, ErrInvalidFrontMatter) {
 			t.Errorf("accepted %q: %v", source, err)

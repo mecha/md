@@ -2,6 +2,7 @@ package md
 
 import (
 	"fmt"
+	"slices"
 	"unicode/utf8"
 )
 
@@ -28,55 +29,73 @@ type DocumentPatch struct {
 // Apply validates and returns an independent document. Nested values are
 // replaced, not merged. Unsets win over sets regardless of their order.
 func (p DocumentPatch) Apply(d Document) (Document, error) {
-	if p.BodyOperation < KeepBody || p.BodyOperation > DeleteBody {
-		return Document{}, fmt.Errorf("%w: unknown body operation %d", ErrInvalidPatch, p.BodyOperation)
-	}
-	result, err := cloneDocument(d)
+	patch, err := p.normalized()
 	if err != nil {
 		return Document{}, err
 	}
-	positions := make(map[string]int, len(result.Props))
-	for i, prop := range result.Props {
+	doc, err := cloneDocument(d)
+	if err != nil {
+		return Document{}, err
+	}
+	return patch.applyTo(doc), nil
+}
+
+// normalized validates every requested operation, even sets that are later
+// overwritten or unset, and copies set values to keep them independent of inputs.
+func (p DocumentPatch) normalized() (DocumentPatch, error) {
+	if p.BodyOperation < KeepBody || p.BodyOperation > DeleteBody {
+		return DocumentPatch{}, fmt.Errorf("%w: unknown body operation %d", ErrInvalidPatch, p.BodyOperation)
+	}
+	sets := make([]Property, len(p.SetProps))
+	for i, prop := range p.SetProps {
+		cloned, err := cloneProperty(prop)
+		if err != nil {
+			return DocumentPatch{}, fmt.Errorf("%w: %w", ErrInvalidPatch, err)
+		}
+		sets[i] = cloned
+	}
+	for _, name := range p.UnsetProps {
+		if name == "" || !utf8.ValidString(name) {
+			return DocumentPatch{}, fmt.Errorf("%w: unset name must be a nonempty UTF-8 string", ErrInvalidPatch)
+		}
+	}
+	p.SetProps = sets
+	return p, nil
+}
+
+// applyTo takes ownership of a validated document and the normalized set values.
+// Keeping this separate lets file patches validate once, before any filesystem I/O.
+func (p DocumentPatch) applyTo(doc Document) Document {
+	positions := make(map[string]int, len(doc.Props))
+	for i, prop := range doc.Props {
 		positions[prop.Name] = i
 	}
 	for _, prop := range p.SetProps {
-		// Validate separately because repeated sets are legal, unlike duplicate
-		// property names in a document.
-		validated, err := cloneDocument(Document{Props: []Property{prop}})
-		if err != nil {
-			return Document{}, fmt.Errorf("%w: %w", ErrInvalidPatch, err)
-		}
-		prop = validated.Props[0]
 		if i, ok := positions[prop.Name]; ok {
-			result.Props[i] = prop
+			doc.Props[i] = prop
 		} else {
-			positions[prop.Name] = len(result.Props)
-			result.Props = append(result.Props, prop)
+			positions[prop.Name] = len(doc.Props)
+			doc.Props = append(doc.Props, prop)
 		}
 	}
-	unset := make(map[string]bool, len(p.UnsetProps))
-	for _, name := range p.UnsetProps {
-		if name == "" || !utf8.ValidString(name) {
-			return Document{}, fmt.Errorf("%w: unset name must be a nonempty UTF-8 string", ErrInvalidPatch)
+	if len(p.UnsetProps) > 0 {
+		unset := make(map[string]bool, len(p.UnsetProps))
+		for _, name := range p.UnsetProps {
+			unset[name] = true
 		}
-		unset[name] = true
+		doc.Props = slices.DeleteFunc(doc.Props, func(prop Property) bool {
+			return unset[prop.Name]
+		})
 	}
-	kept := make([]Property, 0, len(result.Props))
-	for _, prop := range result.Props {
-		if !unset[prop.Name] {
-			kept = append(kept, prop)
-		}
-	}
-	result.Props = kept
 	switch p.BodyOperation {
 	case ReplaceBody:
-		result.Body = p.Body
+		doc.Body = p.Body
 	case AppendBody:
-		result.Body += p.Body
+		doc.Body += p.Body
 	case PrependBody:
-		result.Body = p.Body + result.Body
+		doc.Body = p.Body + doc.Body
 	case DeleteBody:
-		result.Body = ""
+		doc.Body = ""
 	}
-	return result, nil
+	return doc
 }

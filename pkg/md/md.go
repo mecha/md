@@ -11,40 +11,6 @@ import (
 	"path/filepath"
 )
 
-// WriteOption configures Write. Use the option constructors below.
-type WriteOption func(w *writeOptions)
-
-type writeOptions struct {
-	requireFile     bool
-	exclusiveCreate bool
-	createParents   bool
-	filePerms       os.FileMode
-	dirPerms        os.FileMode
-}
-
-var defaultOptions = writeOptions{filePerms: 0o644, dirPerms: 0o755}
-
-// RequireFile makes Write fail if the target is missing. It cannot be combined
-// with ExclusiveCreate(true). Parent creation is ignored when enabled.
-func RequireFile(require bool) WriteOption { return func(w *writeOptions) { w.requireFile = require } }
-
-// ExclusiveCreate prevents overwriting an existing target using OS-level
-// exclusive creation. It cannot be combined with RequireFile(true).
-func ExclusiveCreate(exclusive bool) WriteOption {
-	return func(w *writeOptions) { w.exclusiveCreate = exclusive }
-}
-
-// CreateParents creates missing parent directories for new files.
-func CreateParents(create bool) WriteOption {
-	return func(w *writeOptions) { w.createParents = create }
-}
-
-// FilePerms sets new-file permissions, subject to umask (default 0644).
-func FilePerms(perms os.FileMode) WriteOption { return func(w *writeOptions) { w.filePerms = perms } }
-
-// DirPerms sets new-directory permissions, subject to umask (default 0755).
-func DirPerms(perms os.FileMode) WriteOption { return func(w *writeOptions) { w.dirPerms = perms } }
-
 // Read parses an existing regular file. Symlink targets are rejected.
 func Read(file string) (Document, error) {
 	if _, err := regularFile(file); err != nil {
@@ -65,23 +31,19 @@ func Read(file string) (Document, error) {
 // files are replaced atomically, preserving permissions. Options and contents
 // are validated before filesystem mutation. Callers coordinate concurrent access.
 func Write(file string, doc Document, options ...WriteOption) error {
-	opts := defaultOptions
-	for _, option := range options {
-		if option == nil {
-			return fmt.Errorf("%w: nil option", ErrInvalidOptions)
-		}
-		option(&opts)
-	}
-	if opts.requireFile && opts.exclusiveCreate {
-		return fmt.Errorf("%w: require and exclusive are mutually exclusive", ErrInvalidOptions)
-	}
-	if opts.filePerms & ^os.FileMode(0o777) != 0 || opts.dirPerms & ^os.FileMode(0o777) != 0 {
-		return fmt.Errorf("%w: permissions must be between 0000 and 0777", ErrInvalidOptions)
+	opts, err := resolveWriteOptions(options)
+	if err != nil {
+		return err
 	}
 	data, err := doc.MarshalText()
 	if err != nil {
 		return err
 	}
+	return writeFile(file, data, opts)
+}
+
+// writeFile writes already-serialized data using validated options.
+func writeFile(file string, data []byte, opts writeOptions) error {
 	info, err := os.Lstat(file)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("inspect %q: %w", file, err)
@@ -112,33 +74,31 @@ func Write(file string, doc Document, options ...WriteOption) error {
 	return nil
 }
 
-// Patch updates an existing regular file. Semantically unchanged patches do
-// not rewrite the file. There is no transaction across reading and writing.
+// Patch updates an existing file. Patches that result in no semantic changes do
+// not rewrite the file.
 func Patch(file string, patch DocumentPatch) error {
 	// Validate the patch even when the target is missing.
-	if _, err := patch.Apply(Document{}); err != nil {
+	patch, err := patch.normalized()
+	if err != nil {
 		return err
 	}
 	doc, err := Read(file)
 	if err != nil {
 		return err
 	}
-	updated, err := patch.Apply(doc)
+	before, err := doc.marshalText()
 	if err != nil {
 		return err
 	}
-	before, err := doc.MarshalText()
-	if err != nil {
-		return err
-	}
-	after, err := updated.MarshalText()
+	updated := patch.applyTo(doc)
+	after, err := updated.marshalText()
 	if err != nil {
 		return err
 	}
 	if bytes.Equal(before, after) {
 		return nil
 	}
-	return Write(file, updated, RequireFile(true))
+	return writeFile(file, after, writeOptions{requireFile: true})
 }
 
 func regularFile(file string) (os.FileInfo, error) {
@@ -176,7 +136,10 @@ func writeAtomic(path string, data []byte, permissions fs.FileMode) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = temp.Close(); _ = os.Remove(temp.Name()) }()
+	defer func() {
+		_ = temp.Close()
+		_ = os.Remove(temp.Name())
+	}()
 	if err := temp.Chmod(permissions); err != nil {
 		return err
 	}

@@ -159,14 +159,18 @@ func TestFileTargetErrors(t *testing.T) {
 		}
 	}
 	bad := filepath.Join(dir, "bad.md")
-	original := "---\na: [\n---\nbody"
-	mustWrite(t, bad, original)
-	if err := Patch(bad, DocumentPatch{BodyOperation: DeleteBody}); !errors.Is(err, ErrInvalidFrontMatter) {
-		t.Fatalf("invalid front matter: %v", err)
-	}
-	data, err := os.ReadFile(bad)
-	if err != nil || string(data) != original {
-		t.Fatal("bad file changed")
+	for _, original := range []string{
+		"---\na: [\n---\nbody",
+		"---\na: {1: first, 0x1: second}\n---\nbody",
+	} {
+		mustWrite(t, bad, original)
+		if err := Patch(bad, DocumentPatch{BodyOperation: DeleteBody}); !errors.Is(err, ErrInvalidFrontMatter) {
+			t.Fatalf("invalid front matter: %v", err)
+		}
+		data, err := os.ReadFile(bad)
+		if err != nil || string(data) != original {
+			t.Fatal("bad file changed")
+		}
 	}
 	// Write intentionally replaces even malformed existing content.
 	if err := Write(bad, Document{Body: "fixed"}); err != nil {
@@ -219,6 +223,68 @@ func TestNoOpPatchPreservesFile(t *testing.T) {
 		if err != nil || string(data) != original || !os.SameFile(before, after) || before.ModTime() != after.ModTime() {
 			t.Fatal("no-op rewrote file")
 		}
+	}
+}
+
+func TestInvalidPatchesHaveNoSideEffects(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		patch DocumentPatch
+	}{
+		{"body operation", DocumentPatch{BodyOperation: -1}},
+		{"unset name", DocumentPatch{UnsetProps: []string{""}}},
+		{"property name", DocumentPatch{SetProps: []Property{{Name: "", Value: true}}}},
+		{"overwritten value", DocumentPatch{SetProps: []Property{{Name: "a", Value: new(int)}, {Name: "a", Value: true}}}},
+		{"unset value", DocumentPatch{SetProps: []Property{{Name: "a", Value: new(int)}}, UnsetProps: []string{"a"}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			missing := filepath.Join(dir, "missing", "note.md")
+			if err := Patch(missing, tt.patch); !errors.Is(err, ErrInvalidPatch) {
+				t.Fatalf("missing target: %v", err)
+			}
+			if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+				t.Fatalf("invalid patch created paths: %v, %v", entries, err)
+			}
+
+			path := filepath.Join(dir, "note.md")
+			const original = "---\r\n# keep this comment\r\na: 1\r\n---\r\nbody\r\n"
+			mustWrite(t, path, original)
+			before, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := Patch(path, tt.patch); !errors.Is(err, ErrInvalidPatch) {
+				t.Fatalf("existing target: %v", err)
+			}
+			after, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || string(data) != original || !os.SameFile(before, after) || before.ModTime() != after.ModTime() {
+				t.Fatal("invalid patch modified target")
+			}
+			if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 {
+				t.Fatalf("invalid patch left temporary files: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestAtomicWriteCleansUpAfterRenameFailure(t *testing.T) {
+	dir := t.TempDir()
+	// Renaming a regular temporary file over a directory must fail.
+	target := filepath.Join(dir, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAtomic(target, []byte("replacement"), 0o600); err == nil {
+		t.Fatal("replaced a directory")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "target" || !entries[0].IsDir() {
+		t.Fatalf("temporary files left after failure: %v, %v", entries, err)
 	}
 }
 

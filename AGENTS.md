@@ -14,9 +14,11 @@
 
 ## Code map
 
-- `pkg/md/document.go`: public document model, validation, parsing, serialization.
-- `pkg/md/patch.go`: in-memory patch application.
-- `pkg/md/md.go`: filesystem operations and write options.
+- `pkg/md/document.go`: public document model and serialization.
+- `pkg/md/frontmatter.go`: front-matter parsing and delimiter handling.
+- `pkg/md/value.go`: value normalization, validation, and independent copies.
+- `pkg/md/patch.go`: patch validation and in-memory application.
+- `pkg/md/md.go`: filesystem operations; write options are in `options.go`.
 - `internal/yamldata/`: shared YAML decoding and validation for files and CLI input.
 - `cmd/md/`: CLI adapter; argument parsing in `cli.go`, property assignments in
   `property.go`, process entry point in `main.go`.
