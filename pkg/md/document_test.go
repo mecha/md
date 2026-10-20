@@ -58,6 +58,71 @@ func TestDocumentPropReturnsShallowCopy(t *testing.T) {
 	}
 }
 
+func TestDocumentPropOr(t *testing.T) {
+	doc, err := parse([]byte("---\ntitle: Note\nempty: ''\ndraft: false\ncount: 3\nnullable: null\n---\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		key      string
+		fallback string
+		want     string
+	}{
+		{"title", "Untitled", "Note"},
+		{"empty", "Untitled", ""},
+		{"missing", "Untitled", "Untitled"},
+		{"nullable", "Untitled", "Untitled"},
+		{"count", "Untitled", "Untitled"},
+		{"Title", "Untitled", "Untitled"},
+	} {
+		t.Run(tt.key, func(t *testing.T) {
+			var got string = doc.PropOr(tt.key, tt.fallback)
+			if got != tt.want {
+				t.Fatalf("PropOr(%q, %q) = %q; want %q", tt.key, tt.fallback, got, tt.want)
+			}
+		})
+	}
+	if got := (Document{}).PropOr("title", "Untitled"); got != "Untitled" {
+		t.Fatalf("zero document: %q", got)
+	}
+	if got := doc.PropOr("draft", true); got {
+		t.Fatal("false value replaced by fallback")
+	}
+	if got := doc.PropOr("count", int64(0)); got != int64(3) {
+		t.Fatalf("matching numeric type: %d", got)
+	}
+	if got := doc.PropOr("count", 42); got != 42 {
+		t.Fatalf("mismatched numeric type was converted: %d", got)
+	}
+	if got := doc.PropOr[any]("title", nil); got != "Note" {
+		t.Fatalf("interface type assertion: %#v", got)
+	}
+	duplicates := Document{Props: []Property{{"title", 1}, {"title", "second"}}}
+	if got := duplicates.PropOr("title", "fallback"); got != "fallback" {
+		t.Fatalf("skipped first matching property: %q", got)
+	}
+}
+
+func TestDocumentPropOrDoesNotClone(t *testing.T) {
+	value := map[string]any{"theme": "dark"}
+	fallback := map[string]any{"theme": "default"}
+	doc := Document{Props: []Property{{"config", value}, {"nullable", nil}}}
+
+	got := doc.PropOr("config", fallback)
+	got["theme"] = "light"
+	if value["theme"] != "light" {
+		t.Fatal("property value was cloned")
+	}
+	missing := doc.PropOr("missing", fallback)
+	missing["theme"] = "changed"
+	if fallback["theme"] != "changed" {
+		t.Fatal("fallback was cloned")
+	}
+	if got := doc.PropOr[map[string]any]("nullable", nil); got != nil {
+		t.Fatalf("null with typed nil fallback: %#v", got)
+	}
+}
+
 func TestDocumentRoundTrip(t *testing.T) {
 	body := "# Heading\r\n\n---\nbody delimiter\x00\xff"
 	source := "---\r\nz: &list [1, {deep: true}]\r\na: *list\r\nnull: null\r\n---\r\n" + body

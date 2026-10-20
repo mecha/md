@@ -45,6 +45,19 @@ func (d Document) Prop(key string) (Property, bool) {
 	return Property{}, false
 }
 
+// PropOr returns the property's value if it can be type-asserted to T.
+// Otherwise, including for missing or null properties, it returns fallback.
+// Values are neither converted nor cloned.
+func (d Document) PropOr[T any](key string, fallback T) T {
+	prop, found := d.Prop(key)
+	if found {
+		if value, ok := prop.Value.(T); ok {
+			return value
+		}
+	}
+	return fallback
+}
+
 // MarshalText returns normalized Markdown with YAML front matter. Property
 // order and body bytes are preserved; YAML presentation is not.
 func (d Document) MarshalText() ([]byte, error) {

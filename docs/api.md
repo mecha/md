@@ -16,6 +16,20 @@ case-sensitive name match, or `Property{}, false` if absent. A null value still
 returns `true`. The returned property is a shallow copy; nested values are shared
 with the document.
 
+`doc.PropOr(key, fallback)` infers the return type from the fallback:
+
+```go
+title := doc.PropOr("title", "Untitled") // string
+draft := doc.PropOr("draft", false)     // bool
+count := doc.PropOr("count", int64(0))  // int64
+```
+
+Missing, null, or type-mismatched values return the fallback. Values are not
+converted or cloned: an `int64` property does not match an `int` fallback, and
+returned maps and slices share their underlying data with the document. As with
+`Prop`, names match exactly and the first match wins. Use an explicitly typed
+fallback or type argument when passing `nil`.
+
 ## Example
 
 
